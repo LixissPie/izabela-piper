@@ -226,43 +226,117 @@ function buildPiperSynthesisPayload(
     return payload;
 }
 
+type PiperSynthesisAttempt = {
+    label: string;
+    endpoint: string;
+    init: RequestInit;
+};
+
+function getPiperSynthesisAttempts(apiUrl: string, payload: PiperSynthesisPayload): PiperSynthesisAttempt[] {
+    const jsonBody = JSON.stringify(payload);
+    const textQuery = new URLSearchParams({ text: payload.text }).toString();
+
+    return [
+        {
+            label: 'piper:synthesize-json',
+            endpoint: `${apiUrl}/synthesize`,
+            init: {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: jsonBody,
+            },
+        },
+        {
+            label: 'piper:root-json',
+            endpoint: `${apiUrl}/`,
+            init: {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: jsonBody,
+            },
+        },
+        {
+            label: 'piper:root-plain',
+            endpoint: `${apiUrl}/`,
+            init: {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'text/plain; charset=utf-8',
+                },
+                body: payload.text,
+            },
+        },
+        {
+            label: 'piper:root-get',
+            endpoint: `${apiUrl}/?${textQuery}`,
+            init: {
+                method: 'GET',
+            },
+        },
+    ];
+}
+
 async function synthesizeWithPiper(apiUrl: string, payload: PiperSynthesisPayload) {
     const startedAt = Date.now();
+    const attempts = getPiperSynthesisAttempts(apiUrl, payload);
+    let lastError: Error | null = null;
 
-    devLog('piper:synthesize:request', {
-        endpoint: `${apiUrl}/`,
-        payload,
-    });
+    for (const attempt of attempts) {
+        devLog('piper:synthesize:request', {
+            endpoint: attempt.endpoint,
+            label: attempt.label,
+            payload,
+        });
 
-    const response = await fetchWithRetry(`${apiUrl}/`, {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(payload),
-    }, {
-        event: 'piper:synthesize',
-        attempts: 1,
-        timeoutMs: 5 * 60 * 1000,
-    });
+        try {
+            const response = await fetchWithRetry(attempt.endpoint, attempt.init, {
+                event: attempt.label,
+                attempts: 1,
+                timeoutMs: 5 * 60 * 1000,
+            });
 
-    if (!response.ok) {
-        const responseText = await response.text();
-        throw new Error(`Piper synthesis failed: ${response.status} ${response.statusText} ${responseText}`);
+            if (response.status === 404 || response.status === 405) {
+                devLog('piper:synthesize:skip', {
+                    endpoint: attempt.endpoint,
+                    status: response.status,
+                });
+                continue;
+            }
+
+            if (!response.ok) {
+                const responseText = await response.text();
+                throw new Error(`Piper synthesis failed: ${response.status} ${response.statusText} ${responseText}`);
+            }
+
+            const audioBuffer = Buffer.from(await response.arrayBuffer());
+
+            devLog('piper:synthesize:complete', {
+                endpoint: attempt.endpoint,
+                label: attempt.label,
+                durationMs: Date.now() - startedAt,
+                bytes: audioBuffer.length,
+                contentType: response.headers.get('content-type'),
+            });
+
+            return {
+                audioBuffer,
+                contentType: response.headers.get('content-type') || 'audio/wav',
+            };
+        } catch (error) {
+            lastError = error instanceof Error ? error : new Error(String(error));
+            devLog('piper:synthesize:attempt-failed', {
+                endpoint: attempt.endpoint,
+                label: attempt.label,
+                error: lastError.message,
+            });
+        }
     }
 
-    const audioBuffer = Buffer.from(await response.arrayBuffer());
-
-    devLog('piper:synthesize:complete', {
-        durationMs: Date.now() - startedAt,
-        bytes: audioBuffer.length,
-        contentType: response.headers.get('content-type'),
-    });
-
-    return {
-        audioBuffer,
-        contentType: response.headers.get('content-type') || 'audio/wav',
-    };
+    throw lastError ?? new Error('Piper synthesis failed: no compatible Piper HTTP endpoint found');
 }
 
 expressApp.use(cors());
