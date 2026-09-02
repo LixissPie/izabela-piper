@@ -1,4 +1,4 @@
-# Izabela Next – Piper Custom Server
+# Izabela Next Piper Custom Server
 
 Small tray app that connects **Izabela Next** to a local **Piper** TTS server.
 
